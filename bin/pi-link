@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# bin/pi-link - Bambu P1S <-> Raspberry Pi <-> Campus WiFi Link Manager
+# ==============================================================================
+set -e
+
+# Resolve directory of this script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Source library files
+source "$SCRIPT_DIR/lib/common.sh"
+source "$SCRIPT_DIR/lib/network.sh"
+source "$SCRIPT_DIR/lib/routing.sh"
+source "$SCRIPT_DIR/lib/tailscale.sh"
+source "$SCRIPT_DIR/lib/diagnostics.sh"
+source "$SCRIPT_DIR/lib/esp_flasher.sh"
+
+run_setup_wizard() {
+    require_root "setup"
+    print_banner
+    check_dependencies
+
+    echo -e "${COLOR_CYAN}${COLOR_BOLD}=== Step 1: Network Interface Selection ===${COLOR_RESET}"
+    local default_ifaces=($(detect_default_interfaces))
+    local def_uplink="${default_ifaces[0]}"
+    local def_ap="${default_ifaces[1]}"
+
+    echo -e "Available interfaces: ${COLOR_WHITE}$(list_interfaces | tr '\n' ' ')${COLOR_RESET}"
+    echo ""
+    read -p "Select Campus Uplink interface [default: $def_uplink]: " uplink_iface
+    uplink_iface="${uplink_iface:-$def_uplink}"
+
+    read -p "Select Printer Hotspot interface [default: $def_ap]: " ap_iface
+    ap_iface="${ap_iface:-$def_ap}"
+
+    echo ""
+    echo -e "${COLOR_CYAN}${COLOR_BOLD}=== Step 2: Campus Wi-Fi (UCSD-PROTECTED) Credentials ===${COLOR_RESET}"
+    read -p "Campus Wi-Fi SSID [default: UCSD-PROTECTED]: " campus_ssid
+    campus_ssid="${campus_ssid:-UCSD-PROTECTED}"
+
+    read -p "UCSD Active Directory Username (e.g. jdoe or jdoe@ucsd.edu): " ucsd_user
+    read -s -p "UCSD Password: " ucsd_pass
+    echo ""
+    echo ""
+
+    echo -e "${COLOR_CYAN}${COLOR_BOLD}=== Step 3: Bambu P1S 2.4GHz Hotspot Configuration ===${COLOR_RESET}"
+    read -p "Hotspot SSID [default: Bambu-Pi-Link]: " ap_ssid
+    ap_ssid="${ap_ssid:-Bambu-Pi-Link}"
+
+    read -p "Hotspot WPA2 Password [default: bambulab123]: " ap_pass
+    ap_pass="${ap_pass:-bambulab123}"
+
+    read -p "Wi-Fi 2.4GHz Channel (1, 6, 11) [default: 6]: " ap_channel
+    ap_channel="${ap_channel:-6}"
+
+    echo ""
+    echo -e "${COLOR_CYAN}${COLOR_BOLD}=== Applying Configuration ===${COLOR_RESET}"
+
+    # 1. Setup AP Hotspot
+    configure_printer_hotspot "$ap_iface" "$ap_ssid" "$ap_pass" "$ap_channel"
+
+    # 2. Setup Campus Wi-Fi Client
+    if [[ -n "$ucsd_user" && -n "$ucsd_pass" ]]; then
+        configure_enterprise_client "$uplink_iface" "$campus_ssid" "$ucsd_user" "$ucsd_pass"
+    else
+        log_warn "Skipped campus Wi-Fi configuration (no username/password provided)."
+    fi
+
+    # 3. Kernel IP forwarding & NAT
+    enable_ip_forwarding
+    configure_nat "$uplink_iface" "192.168.4.0/24"
+
+    # 4. Tailscale Subnet Router
+    echo ""
+    echo -e "${COLOR_CYAN}${COLOR_BOLD}=== Step 4: Tailscale Subnet Router Setup ===${COLOR_RESET}"
+    configure_tailscale_subnet_router "192.168.4.0/24"
+
+    echo ""
+    log_success "pi-link setup complete!"
+    echo -e "Run ${COLOR_WHITE}sudo pi-link status${COLOR_RESET} anytime to check the connection status."
+}
+
+show_help() {
+    print_banner
+    echo -e "${COLOR_WHITE}${COLOR_BOLD}Usage:${COLOR_RESET} pi-link <command> [options]"
+    echo ""
+    echo -e "${COLOR_WHITE}${COLOR_BOLD}Commands:${COLOR_RESET}"
+    echo -e "  ${COLOR_CYAN}setup${COLOR_RESET}          Run guided setup wizard (Hotspot, UCSD-PROTECTED, Tailscale)"
+    echo -e "  ${COLOR_CYAN}status${COLOR_RESET}         Display live status dashboard, leases, and port connectivity"
+    echo -e "  ${COLOR_CYAN}test-printer${COLOR_RESET}   Test network and port connection (8883, 990, 6000) to Bambu P1S"
+    echo -e "  ${COLOR_CYAN}flash-esp${COLOR_RESET}      Probe and flash ESP32-C5 (XIAO) over USB with ESP-Hosted"
+    echo -e "  ${COLOR_CYAN}uninstall${COLOR_RESET}      Remove pi-link NetworkManager profiles and firewall rules"
+    echo -e "  ${COLOR_CYAN}help${COLOR_RESET}           Show this help message"
+    echo ""
+}
+
+# Main command dispatcher
+case "${1:-}" in
+    setup)
+        run_setup_wizard
+        ;;
+    status)
+        show_status_dashboard
+        ;;
+    test-printer)
+        test_printer_connectivity "${2:-}"
+        ;;
+    flash-esp)
+        run_esp_flash_wizard
+        ;;
+    uninstall)
+        require_root "uninstall"
+        teardown_network_profiles
+        teardown_routing
+        log_success "pi-link configuration removed."
+        ;;
+    help|--help|-h)
+        show_help
+        ;;
+    *)
+        show_help
+        exit 1
+        ;;
+esac
